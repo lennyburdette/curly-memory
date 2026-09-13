@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Reports the outcome of scripts/check-availability.mjs (result.json +
-# acuity-check.png) to GitHub Issues, attaching the screenshot via the gh
-# CLI's --attach flag:
+# Reports the outcome of scripts/check-availability.mjs (result.json plus
+# one acuity-check-month-N.png screenshot per month it looked at) to GitHub
+# Issues, attaching every screenshot via the gh CLI's --attach flag:
 # https://github.blog/changelog/2026-09-01-github-cli-media-in-issues-pull-requests-and-comments/
 #
 # NOTE: --attach only works with an OAuth token or a Personal Access Token
@@ -52,9 +52,24 @@ echo "Checked at: $CHECKED_AT"
 
 ATTACH_ARGS=()
 HAS_SCREENSHOT=false
-if [ -f acuity-check.png ]; then
+
+if [ -f result.json ] && jq -e '(.months // []) | length > 0' result.json >/dev/null 2>&1; then
+  echo "Building attachments from per-month screenshots..."
+  while IFS=$'\t' read -r file label available; do
+    if [ -n "$file" ] && [ -f "$file" ]; then
+      HAS_SCREENSHOT=true
+      caption="${label:-Month}: ${available} available date(s)"
+      ATTACH_ARGS+=(--attach "${file}#${caption}")
+      echo "  will attach: $file (\"$caption\")"
+    else
+      echo "  skipping missing screenshot: ${file:-<none>}"
+    fi
+  done < <(jq -r '.months[] | [(.screenshot // ""), (.label // ("Month " + (.index|tostring))), (.availableDates|tostring)] | @tsv' result.json)
+elif [ -f acuity-check.png ]; then
+  # Failure-path screenshot (appointment type not found, calendar never
+  # rendered, a crash) — single file, no per-month breakdown available.
   HAS_SCREENSHOT=true
-  ATTACH_ARGS=(--attach "acuity-check.png#Acuity calendar screenshot - $STATUS as of $CHECKED_AT")
+  ATTACH_ARGS=(--attach "acuity-check.png#Acuity widget screenshot - $STATUS as of $CHECKED_AT")
   echo "Screenshot found (acuity-check.png) — will attach to any issue/comment."
 else
   echo "No screenshot found — issues will be filed without one."
@@ -88,7 +103,7 @@ gh_create_issue() {
     echo "$err"
     body="$body
 
-(Could not attach the screenshot — see \`acuity-check.png\` in this run's uploaded artifact instead: $RUN_URL)"
+(Could not attach the screenshot(s) — see this run's uploaded artifact instead: $RUN_URL)"
   fi
   gh issue create --repo "$REPO" --title "$title" --label "$label" --body "$body"
 }
@@ -106,7 +121,7 @@ gh_comment_issue() {
     echo "$err"
     body="$body
 
-(Could not attach the screenshot — see \`acuity-check.png\` in this run's uploaded artifact instead: $RUN_URL)"
+(Could not attach the screenshot(s) — see this run's uploaded artifact instead: $RUN_URL)"
   fi
   gh issue comment "$number" --repo "$REPO" --body "$body"
 }

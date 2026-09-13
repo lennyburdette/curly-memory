@@ -55,6 +55,7 @@ jobs:
           path: |
             result.json
             acuity-check.png
+            acuity-check-month-*.png
           retention-days: 14
           if-no-files-found: ignore
 

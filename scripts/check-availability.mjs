@@ -10,7 +10,9 @@
 //
 // Logs liberally to stdout (prefixed with a timestamp) since this runs
 // unattended in a scheduled GitHub Actions job — the run log is often the
-// only way to see what actually happened.
+// only way to see what actually happened. It also always screenshots each
+// month it looks at (acuity-check-month-N.png), so a wrong "available" or
+// "unavailable" call can be checked against what the page actually showed.
 
 import { chromium } from "playwright";
 import fs from "node:fs";
@@ -25,7 +27,9 @@ const APPOINTMENT_NAME_PATTERN =
   /free get acquainted meeting[\s\S]{0,80}30 minute|30 minute[\s\S]{0,80}free get acquainted meeting|free get acquainted meeting/i;
 const MONTHS_TO_CHECK = 3;
 const RESULT_PATH = path.join(process.cwd(), "result.json");
-const SCREENSHOT_PATH = path.join(process.cwd(), "acuity-check.png");
+// Used for failure screenshots taken before/outside the per-month loop
+// (appointment type not found, calendar never rendered, a crash).
+const FAILURE_SCREENSHOT_PATH = path.join(process.cwd(), "acuity-check.png");
 
 const NO_AVAILABILITY_PATTERNS = [
   /no (available|open) (times|appointments|slots)/i,
@@ -35,6 +39,18 @@ const NO_AVAILABILITY_PATTERNS = [
   /there are no times available/i,
   /no times? (are )?available/i,
 ];
+
+// A calendar day control almost always shows just the day-of-month as its
+// entire visible text (e.g. "14"), which reliably distinguishes it from
+// navigation/today/month-year controls that use icons or words. Those
+// controls sometimes still end up matched by a broad "any button inside a
+// calendar-ish container" selector, so also exclude anything whose
+// aria-label looks like navigation chrome rather than a date.
+const DAY_CELL_CANDIDATE_SELECTOR = '[class*="calendar"] button, [class*="calendar"] a, [class*="calendar-day"]';
+const BARE_DAY_NUMBER_PATTERN = /^\s*\d{1,2}\s*$/;
+const NAV_LABEL_EXCLUDE_PATTERN = /previous|next|today|month|year|close|back|forward|week/i;
+const MONTH_YEAR_PATTERN =
+  /(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}/;
 
 function log(...args) {
   console.log(`[${new Date().toISOString()}]`, ...args);
@@ -46,12 +62,14 @@ function writeResult(result) {
   console.log(JSON.stringify(result, null, 2));
 }
 
-async function saveScreenshot(page, label) {
+async function saveScreenshot(page, label, filePath = FAILURE_SCREENSHOT_PATH) {
   try {
-    await page.screenshot({ path: SCREENSHOT_PATH, fullPage: true });
-    log(`Screenshot saved (${label}) -> ${SCREENSHOT_PATH}`);
+    await page.screenshot({ path: filePath, fullPage: true });
+    log(`Screenshot saved (${label}) -> ${filePath}`);
+    return true;
   } catch (err) {
     log(`Screenshot FAILED (${label}):`, err.message);
+    return false;
   }
 }
 
@@ -194,27 +212,83 @@ async function hasNoAvailabilityText(frame) {
   return false;
 }
 
-const AVAILABLE_DAY_SELECTORS = [
+async function getVisibleMonthLabel(frame) {
+  try {
+    const text = await frame.locator("body").innerText();
+    const match = text.match(MONTH_YEAR_PATTERN);
+    return match ? match[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+// Older, broader fallback selectors for widgets that don't render a bare
+// day-of-month number as the cell's visible text (e.g. legacy Acuity skins).
+const AVAILABLE_DAY_FALLBACK_SELECTORS = [
   "td.calendar-day:not(.unavailable):not(.disabled) a",
   'button[data-testid="calendar-day"]:not([disabled]):not([aria-disabled="true"])',
   '[class*="calendar-day"]:not([aria-disabled="true"]):not(.unavailable):not(.disabled) a',
-  '[class*="calendar"] button:not([disabled]):not([aria-disabled="true"])',
 ];
+const ANY_DAY_FALLBACK_SELECTORS = ["td.calendar-day", '[class*="calendar-day"]'];
 
-// Matches calendar day cells regardless of availability, so we can tell
-// "we found the calendar grid but every day is booked" (unavailable) apart
-// from "this page doesn't look like the calendar we expect" (unknown).
-const ANY_DAY_SELECTORS = ["td.calendar-day", '[class*="calendar-day"]', '[class*="calendar"] button'];
+// Classifies every "day-shaped" candidate in the calendar (bare 1-2 digit
+// visible text, inside a calendar-ish container) as available or not, and
+// logs a handful of samples either way so a wrong verdict can be diagnosed
+// straight from the run log — no screenshot access required.
+async function inspectDayCells(frame) {
+  const candidates = frame.locator(DAY_CELL_CANDIDATE_SELECTOR).filter({ hasText: BARE_DAY_NUMBER_PATTERN });
+  const total = await candidates.count().catch(() => 0);
+
+  if (total === 0) {
+    return { total: 0, available: 0, samples: [] };
+  }
+
+  let available = 0;
+  const samples = [];
+  for (let i = 0; i < total; i++) {
+    const el = candidates.nth(i);
+    const [disabled, ariaDisabled, ariaLabel, text, className] = await Promise.all([
+      el.getAttribute("disabled").catch(() => null),
+      el.getAttribute("aria-disabled").catch(() => null),
+      el.getAttribute("aria-label").catch(() => null),
+      el.innerText().catch(() => ""),
+      el.getAttribute("class").catch(() => null),
+    ]);
+    const isNav = ariaLabel ? NAV_LABEL_EXCLUDE_PATTERN.test(ariaLabel) : false;
+    const isDisabled = disabled !== null || ariaDisabled === "true";
+    const isAvailable = !isNav && !isDisabled;
+    if (isAvailable) available++;
+    if (samples.length < 15) {
+      samples.push({
+        text: text.trim(),
+        ariaLabel,
+        className,
+        disabled: disabled !== null,
+        ariaDisabled: ariaDisabled === "true",
+        excludedAsNav: isNav,
+        countedAsAvailable: isAvailable,
+      });
+    }
+  }
+  return { total, available, samples };
+}
 
 async function countAvailableDays(frame) {
-  // Covers both the legacy PHP calendar markup and the newer React calendar.
-  for (const sel of AVAILABLE_DAY_SELECTORS) {
+  const { total, available, samples } = await inspectDayCells(frame);
+  if (total > 0) {
+    log(`Day-number heuristic: ${total} day cell(s) found, ${available} counted as available.`);
+    log("Day cell samples:", JSON.stringify(samples));
+    return available;
+  }
+
+  log("Day-number heuristic found nothing — trying older fallback selectors.");
+  for (const sel of AVAILABLE_DAY_FALLBACK_SELECTORS) {
     const count = await frame
       .locator(sel)
       .count()
       .catch(() => 0);
     if (count > 0) {
-      log(`Available-day selector matched: "${sel}" -> ${count} day(s).`);
+      log(`Fallback available-day selector matched: "${sel}" -> ${count} day(s).`);
       return count;
     }
   }
@@ -236,13 +310,18 @@ async function dumpFrameSnapshot(frame, label) {
 }
 
 async function hasRecognizedCalendarStructure(frame) {
-  for (const sel of ANY_DAY_SELECTORS) {
+  const { total } = await inspectDayCells(frame);
+  if (total > 0) {
+    log(`Calendar structure recognized via day-number heuristic (${total} day cell(s)).`);
+    return true;
+  }
+  for (const sel of ANY_DAY_FALLBACK_SELECTORS) {
     const count = await frame
       .locator(sel)
       .count()
       .catch(() => 0);
     if (count > 0) {
-      log(`Calendar structure recognized via selector "${sel}" (${count} day cell(s)).`);
+      log(`Calendar structure recognized via fallback selector "${sel}" (${count} day cell(s)).`);
       return true;
     }
   }
@@ -280,7 +359,7 @@ async function goToNextMonth(frame) {
 
 async function main() {
   log(`Starting availability check for: ${TARGET_URL}`);
-  log(`Will check up to ${MONTHS_TO_CHECK} month(s) for an open slot.`);
+  log(`Will check ${MONTHS_TO_CHECK} month(s), screenshotting each one.`);
 
   const browser = await chromium.launch({ headless: true });
   log(`Chromium launched (version ${browser.version()}).`);
@@ -331,52 +410,73 @@ async function main() {
       await dumpFrameSnapshot(frame, "calendar-not-recognized-after-wait");
     }
 
-    let availableDates = 0;
-    let monthsChecked = 0;
+    const months = [];
+    let totalAvailable = 0;
     let noAvailabilityMessageSeen = false;
     let calendarStructureSeen = false;
     let ranOutOfMonthsToAdvance = false;
 
     for (let i = 0; i < MONTHS_TO_CHECK; i++) {
-      monthsChecked++;
-      log(`--- Checking month ${monthsChecked} of up to ${MONTHS_TO_CHECK} ---`);
+      const monthIndex = i + 1;
+      log(`--- Checking month ${monthIndex} of ${MONTHS_TO_CHECK} ---`);
 
-      if (await hasNoAvailabilityText(frame)) {
-        noAvailabilityMessageSeen = true;
+      const label = await getVisibleMonthLabel(frame);
+      log(`Visible month label: ${label ?? "(not found)"}`);
+
+      const noAvailText = await hasNoAvailabilityText(frame);
+      if (noAvailText) noAvailabilityMessageSeen = true;
+
+      const structureRecognized = await hasRecognizedCalendarStructure(frame);
+      if (structureRecognized) calendarStructureSeen = true;
+
+      const available = noAvailText ? 0 : await countAvailableDays(frame);
+      totalAvailable += available;
+      log(`Month ${monthIndex} (${label ?? "unknown"}): ${available} available day(s).`);
+
+      const screenshotPath = path.join(process.cwd(), `acuity-check-month-${monthIndex}.png`);
+      const screenshotSaved = await saveScreenshot(page, `month-${monthIndex}`, screenshotPath);
+
+      months.push({
+        index: monthIndex,
+        label,
+        availableDates: available,
+        calendarStructureRecognized: structureRecognized,
+        noAvailabilityMessageSeen: noAvailText,
+        screenshot: screenshotSaved ? path.basename(screenshotPath) : null,
+      });
+
+      if (noAvailText) {
+        log('No-availability text found — stopping early, later months would show the same message.');
         break;
       }
 
-      if (await hasRecognizedCalendarStructure(frame)) {
-        calendarStructureSeen = true;
-      }
-
-      const count = await countAvailableDays(frame);
-      availableDates += count;
-      log(`Month ${monthsChecked}: ${count} available day(s) found (running total: ${availableDates}).`);
-      if (count > 0) break;
-
-      const advanced = await goToNextMonth(frame);
-      if (!advanced) {
-        ranOutOfMonthsToAdvance = true;
-        break;
+      if (i < MONTHS_TO_CHECK - 1) {
+        const advanced = await goToNextMonth(frame);
+        if (!advanced) {
+          ranOutOfMonthsToAdvance = true;
+          break;
+        }
       }
     }
 
     log(
-      `Loop finished. monthsChecked=${monthsChecked}, availableDates=${availableDates}, ` +
+      `Loop finished. monthsChecked=${months.length}, totalAvailable=${totalAvailable}, ` +
         `noAvailabilityMessageSeen=${noAvailabilityMessageSeen}, calendarStructureSeen=${calendarStructureSeen}, ` +
         `ranOutOfMonthsToAdvance=${ranOutOfMonthsToAdvance}`,
     );
 
-    await saveScreenshot(page, "final-state");
+    const perMonthSummary = months
+      .map((m) => `${m.label ?? `month ${m.index}`}: ${m.availableDates} available date(s)`)
+      .join("; ");
 
-    if (availableDates > 0) {
+    if (totalAvailable > 0) {
       log("DECISION: available");
       writeResult({
         status: "available",
         checkedAt: new Date().toISOString(),
-        message: `Found ${availableDates} selectable date(s) with availability within ${monthsChecked} month(s) checked.`,
-        monthsChecked,
+        message: `Found ${totalAvailable} selectable date(s) across ${months.length} month(s) checked. ${perMonthSummary}`,
+        monthsChecked: months.length,
+        months,
       });
       return;
     }
@@ -389,14 +489,15 @@ async function main() {
     // flag for a human rather than a silent false "unavailable".
     if (
       noAvailabilityMessageSeen ||
-      (calendarStructureSeen && (ranOutOfMonthsToAdvance || monthsChecked >= MONTHS_TO_CHECK))
+      (calendarStructureSeen && (ranOutOfMonthsToAdvance || months.length >= MONTHS_TO_CHECK))
     ) {
       log("DECISION: unavailable");
       writeResult({
         status: "unavailable",
         checkedAt: new Date().toISOString(),
-        message: `No availability found within ${monthsChecked} month(s) checked.`,
-        monthsChecked,
+        message: `No availability found across ${months.length} month(s) checked. ${perMonthSummary}`,
+        monthsChecked: months.length,
+        months,
       });
       return;
     }
@@ -407,7 +508,8 @@ async function main() {
       checkedAt: new Date().toISOString(),
       message:
         "Reached the calendar but could not confidently determine availability. Selectors may need updating.",
-      monthsChecked,
+      monthsChecked: months.length,
+      months,
     });
   } catch (err) {
     log("ERROR during check:", err.stack || err.message);

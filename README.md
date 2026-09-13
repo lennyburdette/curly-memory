@@ -11,18 +11,32 @@ once every weekday, and opens a GitHub issue when it finds one.
   (weekdays, 15:00 UTC by default — edit the cron line to change the time)
   and can also be triggered manually from the Actions tab.
 - `scripts/check-availability.mjs` drives a headless Chromium via Playwright,
-  opens the appointment type, and looks for at least one selectable date
-  across up to 3 months. It logs every step (navigation, frame detection,
-  which selector matched, per-month results, the final decision, and any
-  browser console/page errors) to stdout, so the Actions run log tells the
-  full story of what happened on a given run — not just the final verdict.
-  It also always saves a full-page screenshot (`acuity-check.png`) of the
-  widget's final state, whatever the outcome.
+  opens the appointment type, and always checks all 3 months (it doesn't
+  stop at the first one with an opening), screenshotting each month as it
+  goes (`acuity-check-month-1.png`, `-month-2.png`, `-month-3.png`) so every
+  month it looked at can be visually checked against what it reported, not
+  just the final one. It logs every step (navigation, frame detection,
+  which selector matched, the visible month label, and — critically — a
+  sample of every calendar-day element it considered with its text,
+  aria-label and disabled state, so a wrong "available"/"unavailable" call
+  can be diagnosed straight from the run log) to stdout, so the Actions run
+  log tells the full story of what happened on a given run, not just the
+  final verdict.
+  - Day-cell detection: a real day-of-month control almost always shows
+    just the day number as its entire visible text (e.g. "14"), which
+    reliably separates it from prev/next/today/month controls that use
+    icons or words — even when those controls live inside the same
+    calendar-classed container (that mixing is what caused an early
+    version of this script to misreport "available" when the real
+    calendar showed no open days: two enabled nav-ish elements were
+    getting counted as if they were dates). Falls back to older
+    class-based selectors if a widget doesn't render bare day numbers.
 - `scripts/report-issue.sh` reads `result.json` and reports it via `gh
-  issue create`/`comment`/`close`, attaching the screenshot with `gh`'s
-  `--attach` flag ([media in issues/PRs/comments](https://github.blog/changelog/2026-09-01-github-cli-media-in-issues-pull-requests-and-comments/),
-  Sept 2026) so you can see the actual calendar state, not just a status
-  string:
+  issue create`/`comment`/`close`, attaching every month's screenshot with
+  `gh`'s `--attach` flag ([media in issues/PRs/comments](https://github.blog/changelog/2026-09-01-github-cli-media-in-issues-pull-requests-and-comments/),
+  Sept 2026), each captioned with its month and available-date count, so
+  you can see the actual calendar state for every month checked, not just
+  a status string:
   - **available** → opens an issue labeled `acuity-availability` with the
     screenshot attached (or comments on the existing one, so you're not
     spammed with duplicates).
