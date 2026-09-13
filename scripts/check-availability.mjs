@@ -17,6 +17,10 @@ import fs from "node:fs";
 import path from "node:path";
 
 const TARGET_URL = "https://www.realworldfp.com/scheduleameeting";
+// Acuity embeds show up under either its legacy domain or its short embed
+// domain (e.g. https://realworldfp.as.me/schedule/...) depending on how the
+// site owner set up the widget.
+const ACUITY_FRAME_PATTERN = /acuityscheduling\.com|\.as\.me\//i;
 const APPOINTMENT_NAME_PATTERN =
   /free get acquainted meeting[\s\S]{0,80}30 minute|30 minute[\s\S]{0,80}free get acquainted meeting|free get acquainted meeting/i;
 const MONTHS_TO_CHECK = 3;
@@ -67,7 +71,7 @@ async function findAcuityFrame(page) {
       lastFrameCount = frames.length;
     }
     for (const frame of frames) {
-      if (/acuityscheduling\.com/i.test(frame.url())) {
+      if (ACUITY_FRAME_PATTERN.test(frame.url())) {
         log("Found Acuity iframe:", frame.url());
         return frame;
       }

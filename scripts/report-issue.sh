@@ -4,6 +4,17 @@
 # CLI's --attach flag:
 # https://github.blog/changelog/2026-09-01-github-cli-media-in-issues-pull-requests-and-comments/
 #
+# NOTE: --attach only works with an OAuth token or a Personal Access Token
+# (gh's internal/attachments/client.go allow-lists TokenTypeOAuth and
+# TokenTypePersonalAccess). The default GITHUB_TOKEN GitHub Actions injects
+# is a GitHub App installation token and is explicitly rejected ("unsupported
+# authentication type"). If GH_TOKEN is the default Actions token, every
+# --attach call below will fail — this script catches that and falls back to
+# filing the issue without the attachment, linking to the workflow's
+# artifact instead, so alerting doesn't go silent. To get real inline
+# screenshots, set GH_TOKEN (in the workflow) to a repo secret holding a
+# classic or fine-grained PAT with issue read/write access.
+#
 # Expects to run inside GitHub Actions: GITHUB_REPOSITORY, GITHUB_SERVER_URL,
 # and GITHUB_RUN_ID are provided by the runner, and GH_TOKEN must be set for
 # gh CLI auth. FORCE_REPORT=true additionally files a one-off verification
@@ -40,7 +51,9 @@ echo "Message: $MESSAGE"
 echo "Checked at: $CHECKED_AT"
 
 ATTACH_ARGS=()
+HAS_SCREENSHOT=false
 if [ -f acuity-check.png ]; then
+  HAS_SCREENSHOT=true
   ATTACH_ARGS=(--attach "acuity-check.png#Acuity calendar screenshot - $STATUS as of $CHECKED_AT")
   echo "Screenshot found (acuity-check.png) — will attach to any issue/comment."
 else
@@ -58,6 +71,44 @@ ensure_label acuity-first-run 5319E7 "Manual verification run report"
 
 find_open_issue() {
   gh issue list --repo "$REPO" --state open --label "$1" --json number --jq '.[0].number // empty'
+}
+
+# Creates an issue with the screenshot attached; if the attach upload is
+# rejected (e.g. the default Actions token can't use it), retries without
+# it so the alert still goes out, just without an inline image.
+gh_create_issue() {
+  local title="$1" label="$2" body="$3"
+  local err
+  if [ "$HAS_SCREENSHOT" = "true" ]; then
+    if err=$(gh issue create --repo "$REPO" --title "$title" --label "$label" --body "$body" "${ATTACH_ARGS[@]}" 2>&1); then
+      echo "$err"
+      return 0
+    fi
+    echo "gh issue create with --attach failed, retrying without it:"
+    echo "$err"
+    body="$body
+
+(Could not attach the screenshot — see \`acuity-check.png\` in this run's uploaded artifact instead: $RUN_URL)"
+  fi
+  gh issue create --repo "$REPO" --title "$title" --label "$label" --body "$body"
+}
+
+# Same fallback behavior as gh_create_issue, but comments on an existing issue.
+gh_comment_issue() {
+  local number="$1" body="$2"
+  local err
+  if [ "$HAS_SCREENSHOT" = "true" ]; then
+    if err=$(gh issue comment "$number" --repo "$REPO" --body "$body" "${ATTACH_ARGS[@]}" 2>&1); then
+      echo "$err"
+      return 0
+    fi
+    echo "gh issue comment with --attach failed, retrying without it:"
+    echo "$err"
+    body="$body
+
+(Could not attach the screenshot — see \`acuity-check.png\` in this run's uploaded artifact instead: $RUN_URL)"
+  fi
+  gh issue comment "$number" --repo "$REPO" --body "$body"
 }
 
 close_if_open() {
@@ -90,14 +141,10 @@ EOF
     ISSUE=$(find_open_issue acuity-availability)
     if [ -z "$ISSUE" ]; then
       echo "No open acuity-availability issue — creating one."
-      gh issue create --repo "$REPO" \
-        --title "Acuity availability found: Free Get Acquainted Meeting" \
-        --label acuity-availability \
-        --body "$BODY" \
-        "${ATTACH_ARGS[@]}"
+      gh_create_issue "Acuity availability found: Free Get Acquainted Meeting" acuity-availability "$BODY"
     else
       echo "Open acuity-availability issue #$ISSUE already exists — commenting instead."
-      gh issue comment "$ISSUE" --repo "$REPO" --body "$BODY" "${ATTACH_ARGS[@]}"
+      gh_comment_issue "$ISSUE" "$BODY"
     fi
     close_if_open monitor-needs-attention "Check succeeded again — closing."
     ;;
@@ -119,14 +166,10 @@ EOF
     ISSUE=$(find_open_issue monitor-needs-attention)
     if [ -z "$ISSUE" ]; then
       echo "No open monitor-needs-attention issue — creating one."
-      gh issue create --repo "$REPO" \
-        --title "Acuity availability monitor needs attention" \
-        --label monitor-needs-attention \
-        --body "$BODY" \
-        "${ATTACH_ARGS[@]}"
+      gh_create_issue "Acuity availability monitor needs attention" monitor-needs-attention "$BODY"
     else
       echo "Open monitor-needs-attention issue #$ISSUE already exists — commenting instead."
-      gh issue comment "$ISSUE" --repo "$REPO" --body "$BODY" "${ATTACH_ARGS[@]}"
+      gh_comment_issue "$ISSUE" "$BODY"
     fi
     ;;
 esac
@@ -144,11 +187,7 @@ Checked at: $CHECKED_AT
 Run: $RUN_URL
 EOF
 )
-  gh issue create --repo "$REPO" \
-    --title "Acuity availability check - verification run ($STATUS)" \
-    --label acuity-first-run \
-    --body "$BODY" \
-    "${ATTACH_ARGS[@]}"
+  gh_create_issue "Acuity availability check - verification run ($STATUS)" acuity-first-run "$BODY"
 fi
 
 echo "== report-issue.sh done =="
