@@ -43,22 +43,17 @@ once every weekday, and opens a GitHub issue when it finds one.
 `gh --attach` only accepts an OAuth token or a Personal Access Token —
 `gh`'s own source (`internal/attachments/client.go`) explicitly rejects
 GitHub Actions' default `GITHUB_TOKEN` (a `ghs_...` installation token)
-with "unsupported authentication type". So **with no extra setup, issues
-still get filed, but without the inline screenshot** — `report-issue.sh`
-catches that failure and retries without `--attach`, adding a line
-pointing at the run's uploaded artifact instead, so alerting never goes
-silent because of this.
+with "unsupported authentication type". So without a PAT, issues still
+get filed, but without the inline screenshot — `report-issue.sh` catches
+that failure and retries without `--attach`, adding a line pointing at
+the run's uploaded artifact instead, so alerting never goes silent
+because of this.
 
-To get real inline screenshots in the issue:
-
-1. Create a PAT with issue read/write access — a fine-grained token
-   scoped to just this repo's Issues (Read and write) is the least
-   privilege that works; a classic PAT with the `repo` scope also works.
-2. Add it as a repository secret, e.g. `ACUITY_ISSUE_PAT` (Settings →
-   Secrets and variables → Actions).
-3. In the workflow's "Report result via GitHub issue" step, change
-   `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` to
-   `GH_TOKEN: ${{ secrets.ACUITY_ISSUE_PAT }}`.
+This repo has a PAT with issues read/write access stored as the
+`GH_TOKEN` repository secret (Settings → Secrets and variables →
+Actions), and the workflow's "Report result via GitHub issue" step
+reads it via `GH_TOKEN: ${{ secrets.GH_TOKEN }}`, so screenshots attach
+inline.
 
 ### Verifying it actually works (first run)
 

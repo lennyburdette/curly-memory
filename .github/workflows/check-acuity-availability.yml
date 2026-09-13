@@ -80,7 +80,11 @@ jobs:
       - name: Report result via GitHub issue
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A PAT with issues read/write, stored as the GH_TOKEN repo secret —
+          # gh's --attach upload rejects the default GITHUB_TOKEN (see the
+          # comment at the top of report-issue.sh), so a real PAT is required
+          # to get the screenshot attached inline instead of just linked.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           FORCE_REPORT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_report || 'false' }}
         run: ./scripts/report-issue.sh
 
