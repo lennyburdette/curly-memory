@@ -71,14 +71,28 @@ inline.
 
 ### Getting notified
 
-GitHub only emails you for threads you're actually subscribed to
-(opened, commented, @mentioned, or assigned) — a bot-created issue
-doesn't subscribe you automatically, even if you own the repo. So every
-issue `report-issue.sh` creates or touches is assigned to `lennyburdette`
-(`--assignee` on create, `gh issue edit --add-assignee` before any
-comment/close on an existing one, which also backfills older issues that
-predate this), since GitHub always notifies assignees regardless of
-watch settings.
+Assigning the issue alone isn't enough: GitHub never emails you about
+your own actions, and since `GH_TOKEN` is a personal PAT, every
+create/assign/comment made with it is authored *as you* — a
+self-assignment that silently never notifies, no matter how many repos
+you own or how the issue is labeled.
+
+The fix is to do the notification-triggering actions (create, assign,
+comment) as a genuinely different actor: the default `GITHUB_TOKEN`,
+which authenticates as `github-actions[bot]`, not a person. That's
+passed into `report-issue.sh` as `GH_BOT_TOKEN`. So:
+
+- Creating an issue, assigning it to `lennyburdette`, and commenting on
+  or closing an existing one all go through the bot token — a real
+  cross-actor event, so it actually notifies.
+- Attaching a screenshot still needs the PAT (`GH_TOKEN`), since
+  `--attach` rejects the bot's installation token. That happens as a
+  follow-up `gh issue edit --attach` right after the bot creates the
+  issue — a self-authored edit generates no notification of its own, but
+  the creation already did, and the screenshot ends up in the issue body
+  either way. Recurring comments on an already-open issue skip the
+  attachment (it would be self-authored either way) and just point at
+  the run's screenshots instead.
 
 ### Verifying it actually works (first run)
 

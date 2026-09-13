@@ -4,39 +4,55 @@
 # Issues, attaching every screenshot via the gh CLI's --attach flag:
 # https://github.blog/changelog/2026-09-01-github-cli-media-in-issues-pull-requests-and-comments/
 #
-# NOTE: --attach only works with an OAuth token or a Personal Access Token
-# (gh's internal/attachments/client.go allow-lists TokenTypeOAuth and
-# TokenTypePersonalAccess). The default GITHUB_TOKEN GitHub Actions injects
-# is a GitHub App installation token and is explicitly rejected ("unsupported
-# authentication type"). If GH_TOKEN is the default Actions token, every
-# --attach call below will fail — this script catches that and falls back to
-# filing the issue without the attachment, linking to the workflow's
-# artifact instead, so alerting doesn't go silent. To get real inline
-# screenshots, set GH_TOKEN (in the workflow) to a repo secret holding a
-# classic or fine-grained PAT with issue read/write access.
+# Two tokens, two jobs — this matters for notifications, not just auth:
+#
+# 1. GH_TOKEN: a personal PAT (repo secret). Required for --attach, since
+#    gh's internal/attachments/client.go only allow-lists OAuth and PAT
+#    tokens — the default GITHUB_TOKEN (a ghs_... installation token) is
+#    explicitly rejected with "unsupported authentication type".
+# 2. GH_BOT_TOKEN: the default GITHUB_TOKEN, authenticating as the
+#    github-actions[bot] app rather than a person. This matters because
+#    GitHub never emails you about your own actions — if GH_TOKEN belongs
+#    to the same person this script assigns/creates issues for, every
+#    create/assign/comment is a self-action and silently never notifies,
+#    no matter how the issue ends up labeled or assigned. Since the bot is
+#    a genuinely different actor, the SAME assignment done via GH_BOT_TOKEN
+#    is a normal cross-actor event and does notify.
+#
+# So: creating, assigning, and commenting (the notification-triggering
+# actions) go through the bot token; only attaching a screenshot — which
+# requires the PAT — happens via GH_TOKEN, as a follow-up edit after the
+# bot has already created the issue and fired the notification.
 #
 # Expects to run inside GitHub Actions: GITHUB_REPOSITORY, GITHUB_SERVER_URL,
-# and GITHUB_RUN_ID are provided by the runner, and GH_TOKEN must be set for
-# gh CLI auth. FORCE_REPORT=true additionally files a one-off verification
-# issue for statuses that would otherwise stay quiet (unavailable) — useful
-# for confirming the checker works end to end on its first run.
+# and GITHUB_RUN_ID are provided by the runner. GH_TOKEN and GH_BOT_TOKEN
+# must both be set. FORCE_REPORT=true additionally files a one-off
+# verification issue for statuses that would otherwise stay quiet
+# (unavailable) — useful for confirming the checker works end to end.
 
 set -euo pipefail
 
 REPO="$GITHUB_REPOSITORY"
 RUN_URL="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
 FORCE_REPORT="${FORCE_REPORT:-false}"
-# GitHub only emails you for a thread you're subscribed to — being @mentioned,
-# assigned, or having commented/opened it yourself. A bot-created issue
-# doesn't auto-subscribe the repo owner, so assign every new issue to them;
-# GitHub always notifies assignees regardless of watch settings.
 ASSIGNEE="lennyburdette"
+GH_BOT_TOKEN="${GH_BOT_TOKEN:-}"
 
 echo "== report-issue.sh starting =="
 echo "Repo: $REPO"
 echo "Run URL: $RUN_URL"
 echo "Force report: $FORCE_REPORT"
+echo "Bot token available: $([ -n "$GH_BOT_TOKEN" ] && echo yes || echo no)"
 gh --version
+
+bot_gh() {
+  if [ -z "$GH_BOT_TOKEN" ]; then
+    echo "GH_BOT_TOKEN not set — falling back to GH_TOKEN (won't notify if it's a self-authored PAT)." >&2
+    gh "$@"
+  else
+    GH_TOKEN="$GH_BOT_TOKEN" gh "$@"
+  fi
+}
 
 if [ -f result.json ]; then
   echo "Reading result.json:"
@@ -82,7 +98,7 @@ fi
 
 ensure_label() {
   echo "Ensuring label exists: $1"
-  gh label create "$1" --repo "$REPO" --color "$2" --description "$3" --force >/dev/null
+  bot_gh label create "$1" --repo "$REPO" --color "$2" --description "$3" --force >/dev/null
 }
 
 ensure_label acuity-availability 0E8A16 "Acuity has an open slot for the meeting"
@@ -90,53 +106,57 @@ ensure_label monitor-needs-attention D93F0B "The availability checker could not 
 ensure_label acuity-first-run 5319E7 "Manual verification run report"
 
 find_open_issue() {
-  gh issue list --repo "$REPO" --state open --label "$1" --json number --jq '.[0].number // empty'
+  bot_gh issue list --repo "$REPO" --state open --label "$1" --json number --jq '.[0].number // empty'
 }
 
-# Creates an issue with the screenshot attached; if the attach upload is
-# rejected (e.g. the default Actions token can't use it), retries without
-# it so the alert still goes out, just without an inline image.
+# Creates the issue via the bot token — a genuine cross-actor event, so
+# assigning the user actually notifies them — then attaches screenshots
+# via the PAT in a follow-up edit (--attach requires PAT/OAuth). The edit
+# itself won't generate its own notification, but the creation already did,
+# and the screenshot lands in the issue body either way.
 gh_create_issue() {
   local title="$1" label="$2" body="$3"
-  local err
-  if [ "$HAS_SCREENSHOT" = "true" ]; then
-    if err=$(gh issue create --repo "$REPO" --title "$title" --label "$label" --assignee "$ASSIGNEE" --body "$body" "${ATTACH_ARGS[@]}" 2>&1); then
-      echo "$err"
-      return 0
-    fi
-    echo "gh issue create with --attach failed, retrying without it:"
-    echo "$err"
-    body="$body
+  local out number
 
-(Could not attach the screenshot(s) — see this run's uploaded artifact instead: $RUN_URL)"
+  out=$(bot_gh issue create --repo "$REPO" --title "$title" --label "$label" --assignee "$ASSIGNEE" --body "$body")
+  echo "$out"
+  number=$(echo "$out" | grep -oE '/issues/[0-9]+' | tail -1 | grep -oE '[0-9]+')
+
+  if [ -z "$number" ]; then
+    echo "Could not parse the issue number from gh's output — skipping attachment."
+    return 0
   fi
-  gh issue create --repo "$REPO" --title "$title" --label "$label" --assignee "$ASSIGNEE" --body "$body"
+  if [ "$HAS_SCREENSHOT" != "true" ]; then
+    return 0
+  fi
+
+  echo "Attaching screenshot(s) to #$number via the PAT..."
+  if ! gh issue edit "$number" --repo "$REPO" "${ATTACH_ARGS[@]}" 2>&1; then
+    echo "Attaching screenshot(s) failed — see this run's uploaded artifact instead: $RUN_URL"
+  fi
 }
 
 # Backfills the assignee on an issue that predates this being wired in, so
 # older still-open issues start notifying too, not just newly created ones.
+# Via the bot token, since a self-authored assignment never notifies.
 ensure_assignee() {
   local number="$1"
-  gh issue edit "$number" --repo "$REPO" --add-assignee "$ASSIGNEE" >/dev/null 2>&1 || true
+  bot_gh issue edit "$number" --repo "$REPO" --add-assignee "$ASSIGNEE" >/dev/null 2>&1 || true
 }
 
-# Same fallback behavior as gh_create_issue, but comments on an existing issue.
+# Comments on an existing issue via the bot token, so it actually notifies.
+# No attachment here (that would need the PAT, i.e. a self-authored second
+# comment, which wouldn't notify anyway) — the original screenshot(s) stay
+# on the issue from its creation; this points at the fresh run instead.
 gh_comment_issue() {
   local number="$1" body="$2"
-  local err
   ensure_assignee "$number"
   if [ "$HAS_SCREENSHOT" = "true" ]; then
-    if err=$(gh issue comment "$number" --repo "$REPO" --body "$body" "${ATTACH_ARGS[@]}" 2>&1); then
-      echo "$err"
-      return 0
-    fi
-    echo "gh issue comment with --attach failed, retrying without it:"
-    echo "$err"
     body="$body
 
-(Could not attach the screenshot(s) — see this run's uploaded artifact instead: $RUN_URL)"
+(Screenshots from this run: $RUN_URL)"
   fi
-  gh issue comment "$number" --repo "$REPO" --body "$body"
+  bot_gh issue comment "$number" --repo "$REPO" --body "$body"
 }
 
 close_if_open() {
@@ -147,8 +167,8 @@ close_if_open() {
   if [ -n "$issue" ]; then
     echo "Closing open issue #$issue (label: $label)"
     ensure_assignee "$issue"
-    gh issue comment "$issue" --repo "$REPO" --body "$comment"
-    gh issue close "$issue" --repo "$REPO"
+    bot_gh issue comment "$issue" --repo "$REPO" --body "$comment"
+    bot_gh issue close "$issue" --repo "$REPO"
   else
     echo "No open issue with label $label to close."
   fi

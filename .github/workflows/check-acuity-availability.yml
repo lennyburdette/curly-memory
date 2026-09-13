@@ -86,6 +86,12 @@ jobs:
           # comment at the top of report-issue.sh), so a real PAT is required
           # to get the screenshot attached inline instead of just linked.
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          # The default token, authenticating as github-actions[bot] rather
+          # than the PAT's owner — used for creating/assigning/commenting so
+          # those actions are cross-actor and actually trigger a
+          # notification (GitHub never emails you about your own actions,
+          # which a PAT-owner-authored assignment otherwise would be).
+          GH_BOT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE_REPORT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_report || 'false' }}
         run: ./scripts/report-issue.sh
 
