@@ -196,6 +196,19 @@ async function countAvailableDays(frame) {
   return 0;
 }
 
+async function dumpFrameSnapshot(frame, label) {
+  try {
+    const html = await frame.locator("body").innerHTML();
+    const MAX = 6000;
+    const snippet = html.length > MAX ? `${html.slice(0, MAX)}... [truncated, ${html.length} total chars]` : html;
+    log(`--- Frame body HTML snapshot (${label}) ---`);
+    log(snippet);
+    log("--- end snapshot ---");
+  } catch (err) {
+    log(`Could not capture frame HTML snapshot (${label}):`, err.message);
+  }
+}
+
 async function hasRecognizedCalendarStructure(frame) {
   for (const sel of ANY_DAY_SELECTORS) {
     const count = await frame
@@ -280,8 +293,17 @@ async function main() {
       return;
     }
 
-    log("Waiting 2s for the calendar to render...");
-    await page.waitForTimeout(2000);
+    log("Waiting for the calendar to render (polling up to 10s)...");
+    let renderedInTime = await hasRecognizedCalendarStructure(frame);
+    const renderDeadline = Date.now() + 10_000;
+    while (!renderedInTime && Date.now() < renderDeadline) {
+      await page.waitForTimeout(1000);
+      renderedInTime = await hasRecognizedCalendarStructure(frame);
+    }
+    log(`Calendar structure recognized before the loop starts: ${renderedInTime}`);
+    if (!renderedInTime) {
+      await dumpFrameSnapshot(frame, "calendar-not-recognized-after-wait");
+    }
 
     let availableDates = 0;
     let monthsChecked = 0;
