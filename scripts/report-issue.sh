@@ -114,10 +114,20 @@ find_open_issue() {
 # via the PAT in a follow-up edit (--attach requires PAT/OAuth). The edit
 # itself won't generate its own notification, but the creation already did,
 # and the screenshot lands in the issue body either way.
+#
+# Also puts an explicit @mention in the bot-authored body as a second,
+# independent trigger: GitHub's "assigned" sub-event has turned out to
+# record the assignee as its actor even when the surrounding gh issue
+# create call (and its "labeled" sub-event) is unambiguously bot-authored
+# — an edge case around assigning at creation time, not something a plain
+# text mention is subject to.
 gh_create_issue() {
   local title="$1" label="$2" body="$3"
   local out number
 
+  body="@$ASSIGNEE
+
+$body"
   out=$(bot_gh issue create --repo "$REPO" --title "$title" --label "$label" --assignee "$ASSIGNEE" --body "$body")
   echo "$out"
   number=$(echo "$out" | grep -oE '/issues/[0-9]+' | tail -1 | grep -oE '[0-9]+')
@@ -151,6 +161,9 @@ ensure_assignee() {
 gh_comment_issue() {
   local number="$1" body="$2"
   ensure_assignee "$number"
+  body="@$ASSIGNEE
+
+$body"
   if [ "$HAS_SCREENSHOT" = "true" ]; then
     body="$body
 
