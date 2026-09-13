@@ -117,6 +117,32 @@ async function selectAppointmentType(frame) {
   }
 
   log(`Looking for the "Free Get Acquainted Meeting" appointment type link/button...`);
+
+  // The current Acuity widget renders each appointment type as a list item
+  // (class containing "select-item") where the name text and the "Book"
+  // button are siblings, not the same clickable element — clicking the name
+  // itself is a real click that "succeeds" but does nothing. Scope to the
+  // matching item and click its Book button specifically.
+  const item = frame.locator('[class*="select-item"]').filter({ hasText: APPOINTMENT_NAME_PATTERN }).first();
+  const itemCount = await item.count().catch(() => 0);
+  log(`Strategy "select-item + Book button": ${itemCount} matching item(s).`);
+  if (itemCount) {
+    const bookButton = item.getByRole("button", { name: /book/i }).first();
+    const bookCount = await bookButton.count().catch(() => 0);
+    log(`"Book" button within matched item: ${bookCount} match(es).`);
+    if (bookCount) {
+      try {
+        await bookButton.scrollIntoViewIfNeeded();
+        await bookButton.click({ timeout: 5000 });
+        log('Clicked the "Book" button for the matched appointment type.');
+        return true;
+      } catch (err) {
+        log(`Clicking the "Book" button failed: ${err.message}`);
+      }
+    }
+  }
+
+  log("Falling back to older/generic strategies...");
   const strategies = [
     { name: "role=link", locator: () => frame.getByRole("link", { name: APPOINTMENT_NAME_PATTERN }) },
     { name: "role=button", locator: () => frame.getByRole("button", { name: APPOINTMENT_NAME_PATTERN }) },
