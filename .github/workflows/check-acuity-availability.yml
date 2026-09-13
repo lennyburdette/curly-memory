@@ -1,0 +1,168 @@
+name: Check Acuity Availability
+
+on:
+  schedule:
+    # 15:00 UTC (11:00 AM ET / 8:00 AM PT), Monday-Friday only.
+    # Adjust the hour to taste — cron time is always UTC.
+    - cron: "0 15 * * 1-5"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: check-acuity-availability
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run availability check
+        id: check
+        continue-on-error: true
+        run: npm run check
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acuity-check-${{ github.run_id }}
+          path: |
+            result.json
+            acuity-check.png
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Report result via GitHub issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+
+            let result;
+            try {
+              result = JSON.parse(fs.readFileSync("result.json", "utf8"));
+            } catch (err) {
+              const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+              result = {
+                status: "unknown",
+                checkedAt: new Date().toISOString(),
+                message: `The check script crashed before writing a result. See the run log: ${runUrl}`,
+              };
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            async function findOpenIssue(label) {
+              const issues = await github.rest.issues.listForRepo({
+                owner,
+                repo,
+                state: "open",
+                labels: label,
+              });
+              return issues.data[0] ?? null;
+            }
+
+            async function closeIfOpen(label, closingComment) {
+              const existing = await findOpenIssue(label);
+              if (!existing) return;
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: existing.number,
+                body: closingComment,
+              });
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: existing.number,
+                state: "closed",
+              });
+            }
+
+            if (result.status === "available") {
+              const existing = await findOpenIssue("acuity-availability");
+              if (!existing) {
+                await github.rest.issues.create({
+                  owner,
+                  repo,
+                  title: "Acuity availability found: Free Get Acquainted Meeting",
+                  body: [
+                    "Availability detected for **Free Get Acquainted Meeting - 30 Minute Video Meeting**.",
+                    "",
+                    result.message ?? "",
+                    "",
+                    "Book here: https://www.realworldfp.com/scheduleameeting",
+                    "",
+                    `Checked at: ${result.checkedAt}`,
+                  ].join("\n"),
+                  labels: ["acuity-availability"],
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: existing.number,
+                  body: `Still available as of ${result.checkedAt}. ${result.message ?? ""}`,
+                });
+              }
+              // A successful, meaningful check just ran — clear any stale "needs attention" flag.
+              await closeIfOpen("monitor-needs-attention", "Check succeeded again — closing.");
+            } else if (result.status === "unavailable") {
+              await closeIfOpen(
+                "acuity-availability",
+                `No longer available as of ${result.checkedAt}.`,
+              );
+              await closeIfOpen("monitor-needs-attention", "Check succeeded again — closing.");
+            } else {
+              const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+              const body = [
+                "The availability checker could not confidently determine the calendar state.",
+                "",
+                result.message ?? "",
+                "",
+                `Run: ${runUrl}`,
+                "",
+                "A debug screenshot is attached to the run's artifacts.",
+              ].join("\n");
+
+              const existing = await findOpenIssue("monitor-needs-attention");
+              if (!existing) {
+                await github.rest.issues.create({
+                  owner,
+                  repo,
+                  title: "Acuity availability monitor needs attention",
+                  body,
+                  labels: ["monitor-needs-attention"],
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: existing.number,
+                  body,
+                });
+              }
+            }
+
+      - name: Fail job if the check script crashed
+        if: steps.check.outcome == 'failure'
+        run: exit 1

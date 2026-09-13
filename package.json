@@ -1,0 +1,13 @@
+{
+  "name": "acuity-availability-monitor",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Checks realworldfp.com's Acuity scheduling widget for open slots on the Free Get Acquainted Meeting and alerts via a GitHub issue.",
+  "scripts": {
+    "check": "node scripts/check-availability.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.55.0"
+  }
+}
