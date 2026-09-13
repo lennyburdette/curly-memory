@@ -69,6 +69,17 @@ Actions), and the workflow's "Report result via GitHub issue" step
 reads it via `GH_TOKEN: ${{ secrets.GH_TOKEN }}`, so screenshots attach
 inline.
 
+### Getting notified
+
+GitHub only emails you for threads you're actually subscribed to
+(opened, commented, @mentioned, or assigned) — a bot-created issue
+doesn't subscribe you automatically, even if you own the repo. So every
+issue `report-issue.sh` creates or touches is assigned to `lennyburdette`
+(`--assignee` on create, `gh issue edit --add-assignee` before any
+comment/close on an existing one, which also backfills older issues that
+predate this), since GitHub always notifies assignees regardless of
+watch settings.
+
 ### Verifying it actually works (first run)
 
 Trigger the workflow manually from the Actions tab ("Run workflow"). The

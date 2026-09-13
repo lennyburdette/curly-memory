@@ -26,6 +26,11 @@ set -euo pipefail
 REPO="$GITHUB_REPOSITORY"
 RUN_URL="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
 FORCE_REPORT="${FORCE_REPORT:-false}"
+# GitHub only emails you for a thread you're subscribed to — being @mentioned,
+# assigned, or having commented/opened it yourself. A bot-created issue
+# doesn't auto-subscribe the repo owner, so assign every new issue to them;
+# GitHub always notifies assignees regardless of watch settings.
+ASSIGNEE="lennyburdette"
 
 echo "== report-issue.sh starting =="
 echo "Repo: $REPO"
@@ -95,7 +100,7 @@ gh_create_issue() {
   local title="$1" label="$2" body="$3"
   local err
   if [ "$HAS_SCREENSHOT" = "true" ]; then
-    if err=$(gh issue create --repo "$REPO" --title "$title" --label "$label" --body "$body" "${ATTACH_ARGS[@]}" 2>&1); then
+    if err=$(gh issue create --repo "$REPO" --title "$title" --label "$label" --assignee "$ASSIGNEE" --body "$body" "${ATTACH_ARGS[@]}" 2>&1); then
       echo "$err"
       return 0
     fi
@@ -105,13 +110,21 @@ gh_create_issue() {
 
 (Could not attach the screenshot(s) — see this run's uploaded artifact instead: $RUN_URL)"
   fi
-  gh issue create --repo "$REPO" --title "$title" --label "$label" --body "$body"
+  gh issue create --repo "$REPO" --title "$title" --label "$label" --assignee "$ASSIGNEE" --body "$body"
+}
+
+# Backfills the assignee on an issue that predates this being wired in, so
+# older still-open issues start notifying too, not just newly created ones.
+ensure_assignee() {
+  local number="$1"
+  gh issue edit "$number" --repo "$REPO" --add-assignee "$ASSIGNEE" >/dev/null 2>&1 || true
 }
 
 # Same fallback behavior as gh_create_issue, but comments on an existing issue.
 gh_comment_issue() {
   local number="$1" body="$2"
   local err
+  ensure_assignee "$number"
   if [ "$HAS_SCREENSHOT" = "true" ]; then
     if err=$(gh issue comment "$number" --repo "$REPO" --body "$body" "${ATTACH_ARGS[@]}" 2>&1); then
       echo "$err"
@@ -133,6 +146,7 @@ close_if_open() {
   issue=$(find_open_issue "$label")
   if [ -n "$issue" ]; then
     echo "Closing open issue #$issue (label: $label)"
+    ensure_assignee "$issue"
     gh issue comment "$issue" --repo "$REPO" --body "$comment"
     gh issue close "$issue" --repo "$REPO"
   else
