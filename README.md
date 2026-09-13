@@ -12,15 +12,41 @@ once every weekday, and opens a GitHub issue when it finds one.
   and can also be triggered manually from the Actions tab.
 - `scripts/check-availability.mjs` drives a headless Chromium via Playwright,
   opens the appointment type, and looks for at least one selectable date
-  across up to 3 months.
-- The workflow reads the script's `result.json` and:
-  - **available** → opens an issue labeled `acuity-availability` (or comments
-    on the existing one, so you're not spammed with duplicates).
-  - **unavailable** → closes that issue if one was open.
+  across up to 3 months. It logs every step (navigation, frame detection,
+  which selector matched, per-month results, the final decision, and any
+  browser console/page errors) to stdout, so the Actions run log tells the
+  full story of what happened on a given run — not just the final verdict.
+  It also always saves a full-page screenshot (`acuity-check.png`) of the
+  widget's final state, whatever the outcome.
+- `scripts/report-issue.sh` reads `result.json` and reports it via `gh
+  issue create`/`comment`/`close`, attaching the screenshot with `gh`'s
+  `--attach` flag ([media in issues/PRs/comments](https://github.blog/changelog/2026-09-01-github-cli-media-in-issues-pull-requests-and-comments/),
+  Sept 2026) so you can see the actual calendar state, not just a status
+  string:
+  - **available** → opens an issue labeled `acuity-availability` with the
+    screenshot attached (or comments on the existing one, so you're not
+    spammed with duplicates).
+  - **unavailable** → closes that issue if one was open. Quiet otherwise —
+    no issue on a normal "nothing open" day.
   - **unknown** (selectors didn't match anything recognizable, or the script
-    crashed) → opens/updates an issue labeled `monitor-needs-attention` and
-    uploads a debug screenshot + `result.json` as a workflow artifact, and
-    fails the job so it's visible as a red X in the Actions tab too.
+    crashed) → opens/updates an issue labeled `monitor-needs-attention` with
+    the screenshot attached, and fails the job so it's visible as a red X
+    in the Actions tab too.
+  - The workflow also installs a current `gh` CLI from `cli.github.com`'s
+    apt repo before this step, since `--attach` is too new to be on
+    `ubuntu-latest`'s preinstalled `gh` yet.
+  - The screenshot and `result.json` are also uploaded as a workflow
+    artifact on every run, regardless of status, for deeper debugging.
+
+### Verifying it actually works (first run)
+
+Trigger the workflow manually from the Actions tab ("Run workflow"). The
+`force_report` input defaults to `true` on manual runs, which files a
+one-off issue (labeled `acuity-first-run`) with the screenshot attached
+*even if the result is "unavailable"* — so you get a notification and can
+see exactly what the script saw. Scheduled (cron) runs never set this, so
+the normal quiet behavior for "unavailable" is untouched. Uncheck the box
+if you want a manual run to behave like a normal scheduled one.
 
 ## Local run
 
@@ -30,6 +56,11 @@ npx playwright install --with-deps chromium
 npm run check
 cat result.json
 ```
+
+`scripts/report-issue.sh` is meant to run inside GitHub Actions (it reads
+`GITHUB_REPOSITORY`/`GITHUB_SERVER_URL`/`GITHUB_RUN_ID` from the runner
+environment and needs `GH_TOKEN` set for `gh` auth) — it's not intended to
+be run standalone locally.
 
 ## Alerting
 
